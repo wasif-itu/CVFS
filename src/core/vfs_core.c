@@ -22,6 +22,75 @@ static uint64_t g_next_ino = 1000;
 static int g_vfs_inited = 0;
 
 /* -------------------------------------------------------------------------- */
+/* File handle table (simple)                                                  */
+/* -------------------------------------------------------------------------- */
+#define VFS_MAX_FH 1024
+typedef struct vfs_fh_entry {
+    int in_use;
+    vfs_dentry_t *dentry;
+    int flags;
+    off_t pos;
+    pthread_mutex_t lock;
+} vfs_fh_entry_t;
+
+static vfs_fh_entry_t g_fh_table[VFS_MAX_FH];
+
+static void fh_table_init_once(void)
+{
+    static int inited = 0;
+    if (inited) return;
+    for (int i = 0; i < VFS_MAX_FH; i++) {
+        g_fh_table[i].in_use = 0;
+        g_fh_table[i].dentry = NULL;
+        g_fh_table[i].flags = 0;
+        g_fh_table[i].pos = 0;
+        pthread_mutex_init(&g_fh_table[i].lock, NULL);
+    }
+    inited = 1;
+}
+
+static int fh_alloc(vfs_dentry_t *d, int flags)
+{
+    fh_table_init_once();
+    for (int i = 0; i < VFS_MAX_FH; i++) {
+        if (!g_fh_table[i].in_use) {
+            pthread_mutex_lock(&g_fh_table[i].lock);
+            if (!g_fh_table[i].in_use) {
+                g_fh_table[i].in_use = 1;
+                g_fh_table[i].dentry = d;
+                g_fh_table[i].flags = flags;
+                g_fh_table[i].pos = 0;
+                pthread_mutex_unlock(&g_fh_table[i].lock);
+                return i + 1; /* handle id */
+            }
+            pthread_mutex_unlock(&g_fh_table[i].lock);
+        }
+    }
+    return -EMFILE;
+}
+
+static vfs_fh_entry_t *fh_get(int fh)
+{
+    if (fh <= 0) return NULL;
+    int idx = fh - 1;
+    if (idx < 0 || idx >= VFS_MAX_FH) return NULL;
+    if (!g_fh_table[idx].in_use) return NULL;
+    return &g_fh_table[idx];
+}
+
+static void fh_free(int fh)
+{
+    vfs_fh_entry_t *e = fh_get(fh);
+    if (!e) return;
+    pthread_mutex_lock(&e->lock);
+    e->in_use = 0;
+    e->dentry = NULL;
+    e->flags = 0;
+    e->pos = 0;
+    pthread_mutex_unlock(&e->lock);
+}
+
+/* -------------------------------------------------------------------------- */
 /* PATH NORMALIZATION */
 /* -------------------------------------------------------------------------- */
 
@@ -493,4 +562,160 @@ int vfs_shutdown(void)
 
     pthread_mutex_unlock(&g_vfs_lock);
     return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public API stubs (shim implementations)                                      */
+/* These return -ENOSYS for now so other layers can compile and link.         */
+/* -------------------------------------------------------------------------- */
+
+int vfs_open(const char *path, int flags)
+{
+    if (!path)
+        return -EINVAL;
+
+    if (!g_vfs_inited)
+        return -EIO;
+
+    vfs_dentry_t *d = NULL;
+    int ret = vfs_resolve_path(path, &d);
+    if (ret != 0 || !d)
+        return ret ? ret : -ENOENT;
+
+    /* Directories cannot be opened for read/write as files */
+    if (d->inode && S_ISDIR(d->inode->mode))
+        return -EISDIR;
+
+    /* allocate a handle */
+    int fh = fh_alloc(d, flags);
+    if (fh < 0)
+        return fh;
+
+    return fh;
+}
+
+ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset)
+{
+    if (!buf)
+        return -EINVAL;
+
+    vfs_fh_entry_t *e = fh_get(fh);
+    if (!e)
+        return -EBADF;
+
+    vfs_dentry_t *d = e->dentry;
+    if (!d || !d->inode)
+        return -ENOENT;
+
+    if (S_ISDIR(d->inode->mode))
+        return -EISDIR;
+
+    /* simple zero-filled content model: return zeros up to inode size */
+    off_t size = d->inode->size;
+    if (offset >= size)
+        return 0;
+
+    size_t avail = (size - offset) > 0 ? (size - offset) : 0;
+    size_t n = (count < avail) ? count : avail;
+    memset(buf, 0, n);
+    return (ssize_t)n;
+}
+
+ssize_t vfs_write(int fh, const void *buf, size_t count, off_t offset)
+{
+    if (!buf)
+        return -EINVAL;
+
+    vfs_fh_entry_t *e = fh_get(fh);
+    if (!e)
+        return -EBADF;
+
+    vfs_dentry_t *d = e->dentry;
+    if (!d || !d->inode)
+        return -ENOENT;
+
+    if (S_ISDIR(d->inode->mode))
+        return -EISDIR;
+
+    /* Grow file size to simulate write */
+    off_t end = offset + (off_t)count;
+    if (end > d->inode->size)
+        d->inode->size = end;
+
+    /* We don't store content; pretend we wrote all bytes */
+    return (ssize_t)count;
+}
+
+int vfs_stat(const char *path, struct stat *st)
+{
+    if (!path || !st)
+        return -EINVAL;
+
+    vfs_dentry_t *d = NULL;
+    int ret = vfs_resolve_path(path, &d);
+    if (ret != 0 || !d)
+        return ret ? ret : -ENOENT;
+
+    if (!d->inode)
+        return -ENOENT;
+
+    memset(st, 0, sizeof(*st));
+    st->st_mode = d->inode->mode;
+    st->st_size = d->inode->size;
+    st->st_uid = d->inode->uid;
+    st->st_gid = d->inode->gid;
+    st->st_ino = d->inode->ino;
+    return 0;
+}
+
+int vfs_readdir(const char *path, void *buf, void *filler)
+{
+    if (!path || !buf || !filler)
+        return -EINVAL;
+
+    vfs_dentry_t *d = NULL;
+    int ret = vfs_resolve_path(path, &d);
+    if (ret != 0 || !d)
+        return ret ? ret : -ENOENT;
+
+    if (!d->inode)
+        return -ENOENT;
+
+    if (!S_ISDIR(d->inode->mode))
+        return -ENOTDIR;
+
+    /* filler: int (*)(void *buf, const char *name, const struct stat *st, off_t off) */
+    typedef int (*fill_fn_t)(void *, const char *, const struct stat *, off_t);
+    fill_fn_t fill = (fill_fn_t)filler;
+
+    pthread_mutex_lock(&d->lock);
+    for (vfs_dentry_t *c = d->child; c; c = c->sibling) {
+        struct stat stbuf;
+        memset(&stbuf, 0, sizeof(stbuf));
+        if (c->inode) {
+            stbuf.st_mode = c->inode->mode;
+            stbuf.st_size = c->inode->size;
+            stbuf.st_ino = c->inode->ino;
+        }
+        /* ignore return; fuse filler returns non-zero to stop */
+        fill(buf, c->name, &stbuf, 0);
+    }
+    pthread_mutex_unlock(&d->lock);
+
+    return 0;
+}
+
+int vfs_permission_check(const char *path, uid_t uid, gid_t gid, int mask)
+{
+    (void)path; (void)uid; (void)gid; (void)mask;
+    return -ENOSYS;
+}
+
+/* Public wrapper: vfs_lookup delegates to vfs_resolve_path. */
+int vfs_lookup(const char *path, vfs_dentry_t **out)
+{
+    if (!path || !out)
+        return -EINVAL;
+
+    return vfs_resolve_path(path, out);
 }

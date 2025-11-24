@@ -66,6 +66,11 @@ typedef struct vfs_mount {
 /* Global mount list */
 extern vfs_mount_entry_t *mount_table_head;
 
+/* Compatibility aliases (some tests and older code expect these names) */
+typedef vfs_mount_entry_t mount_entry_t;
+typedef vfs_dentry_t dentry_t;
+typedef vfs_inode_t inode_t;
+
 /* ----------------------------------
  * Initialization
  * ---------------------------------- */
@@ -122,5 +127,17 @@ int vfs_resolve_path(const char *path, vfs_dentry_t **out);
  *   simple wrapper: returns 0 if found, -ENOENT if not
  */
 int vfs_lookup(const char *path, vfs_dentry_t **out);
+
+/* ----------------------------------
+ * Public API stubs (to be implemented)
+ * These allow other layers to compile against the core while
+ * the full implementations are being developed.
+ * ---------------------------------- */
+int vfs_open(const char *path, int flags);
+ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset);
+ssize_t vfs_write(int fh, const void *buf, size_t count, off_t offset);
+int vfs_stat(const char *path, struct stat *st);
+int vfs_readdir(const char *path, void *buf, void *filler);
+int vfs_permission_check(const char *path, uid_t uid, gid_t gid, int mask);
 
 #endif /* VFS_CORE_H */
