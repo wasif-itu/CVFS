@@ -1,0 +1,13 @@
+FUSE :
+static struct fuse_operations my_fuse_ops = {
+.getattr = my_fuse_getattr,
+.read = my_fuse_read,
+.write = my_fuse_write,
+.readdir = my_fuse_readdir,
+.mkdir = my_fuse_mkdir,
+.mknod = my_fuse_mknod,
+.open = my_fuse_open,
+.create = my_fuse_create,
+.readlink = my_fuse_readlink,
+.symlink = my_fuse_symlink,
+};
