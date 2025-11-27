@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 /* -------- FUSE callback wrappers ---------- */
-int my_fuse_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi);
+int my_fuse_getattr(const char *path, struct stat *st, struct fuse_file_info *fi);
 int my_fuse_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 int my_fuse_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 int my_fuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -23,11 +23,16 @@ int my_fuse_open(const char *path, struct fuse_file_info *fi);
 int my_fuse_create(const char *path, mode_t mode, struct fuse_file_info *fi);
 int my_fuse_readlink(const char *path, char *buf, size_t size);
 int my_fuse_symlink(const char *target, const char *linkpath);
+void *my_fuse_init(struct fuse_conn_info *conn, struct fuse_config *cfg);
+void my_fuse_destroy(void *private_data);
 
 /* The operations table */
 extern struct fuse_operations my_fuse_ops;
 
 /* ========= Minimal VFS API (dummy implementation in vfs_core_dummy.c) ======== */
+/* Initialize / shutdown the VFS. Return 0 on success or negative errno. */
+int vfs_init(void);
+int vfs_destroy(void);
 
 /* Metadata */
 int vfs_getattr(const char *path, struct stat *stbuf);
