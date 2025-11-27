@@ -38,4 +38,18 @@ int posix_stat(int backend_id, const char *relpath, struct stat *st);
  */
 int posix_readdir(int backend_id, const char *relpath, void *buf, vfs_fill_dir_t filler, off_t offset);
 
+
+/* Create file (like open with O_CREAT | O_EXCL). Returns handle (>0) or -1 */
+int posix_create(int backend_id, const char *relpath, mode_t mode);
+
+/* Unlink (delete) a file. Returns 0 on success, -1 on error */
+int posix_unlink(int backend_id, const char *relpath);
+
+/* Rename a file within the same backend (old -> new). Returns 0 on success */
+int posix_rename(int backend_id, const char *old_relpath, const char *new_relpath);
+
+/* Make directory. Returns 0 on success */
+int posix_mkdir(int backend_id, const char *relpath, mode_t mode);
+
+
 #endif /* BACKEND_POSIX_H */
