@@ -338,3 +338,76 @@ int posix_readdir(int backend_id, const char *relpath, void *buf, vfs_fill_dir_t
     closedir(d);
     return 0;
 }
+
+/* Create file: open with O_CREAT|O_EXCL and return a handle */
+int posix_create(int backend_id, const char *relpath, mode_t mode) {
+    posix_backend_t *b = get_backend(backend_id);
+    if (!b || !relpath) { errno = EINVAL; return -1; }
+
+    char full[PATH_BUFSZ];
+    if (join_backend_path(b->rootpath, relpath, full, sizeof(full)) != 0) {
+        return -1;
+    }
+
+    int fd = open(full, O_CREAT | O_EXCL | O_RDWR, mode);
+    if (fd < 0) return -1;
+
+    int handle = create_handle(b, fd);
+    if (handle < 0) {
+        close(fd);
+        return -1;
+    }
+    return handle;
+}
+
+/* Unlink a file or rmdir if directory (we use unlink for files, rmdir for dirs) */
+int posix_unlink(int backend_id, const char *relpath) {
+    posix_backend_t *b = get_backend(backend_id);
+    if (!b || !relpath) { errno = EINVAL; return -1; }
+
+    char full[PATH_BUFSZ];
+    if (join_backend_path(b->rootpath, relpath, full, sizeof(full)) != 0) {
+        return -1;
+    }
+
+    /* Try unlink first */
+    if (unlink(full) == 0) return 0;
+
+    /* If unlink failed with EISDIR, try rmdir */
+    if (errno == EISDIR) {
+        if (rmdir(full) == 0) return 0;
+    }
+    return -1;
+}
+
+/* Rename within backend */
+int posix_rename(int backend_id, const char *old_relpath, const char *new_relpath) {
+    posix_backend_t *b = get_backend(backend_id);
+    if (!b || !old_relpath || !new_relpath) { errno = EINVAL; return -1; }
+
+    char full_old[PATH_BUFSZ];
+    char full_new[PATH_BUFSZ];
+    if (join_backend_path(b->rootpath, old_relpath, full_old, sizeof(full_old)) != 0) {
+        return -1;
+    }
+    if (join_backend_path(b->rootpath, new_relpath, full_new, sizeof(full_new)) != 0) {
+        return -1;
+    }
+
+    if (rename(full_old, full_new) != 0) return -1;
+    return 0;
+}
+
+/* Make directory */
+int posix_mkdir(int backend_id, const char *relpath, mode_t mode) {
+    posix_backend_t *b = get_backend(backend_id);
+    if (!b || !relpath) { errno = EINVAL; return -1; }
+
+    char full[PATH_BUFSZ];
+    if (join_backend_path(b->rootpath, relpath, full, sizeof(full)) != 0) {
+        return -1;
+    }
+
+    if (mkdir(full, mode) != 0) return -1;
+    return 0;
+}
