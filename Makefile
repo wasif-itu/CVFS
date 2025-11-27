@@ -26,7 +26,8 @@ vfs_demo: $(OBJ)
 clean:
 	rm -f $(OBJ) vfs_demo \
 	      tests/test_core_structs/test_core_structs \
-	      tests/test_lookup test_lookup.o
+	      tests/test_lookup test_lookup.o \
+	      tests/test_file_ops test_file_ops.o
 
 # -----------------------------
 # Test: Core Structs
@@ -54,7 +55,18 @@ test_lookup: $(TEST_LOOKUP_OBJ) $(CORE_SRC:.c=.o)
 	./test_lookup
 
 # -----------------------------
+# Test: File Operations
+# -----------------------------
+TEST_FILE_OPS_SRC=tests/test_file_ops.c
+TEST_FILE_OPS_OBJ=$(TEST_FILE_OPS_SRC:.c=.o)
+
+.PHONY: test_file_ops
+test_file_ops: $(TEST_FILE_OPS_OBJ) $(CORE_SRC:.c=.o)
+	$(CC) -o $@ $^ $(LIBS)
+	./test_file_ops
+
+# -----------------------------
 # Run ALL tests
 # -----------------------------
 .PHONY: test
-test: test_core test_lookup
+test: test_core test_lookup test_file_ops

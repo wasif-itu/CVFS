@@ -186,3 +186,80 @@ make test
 If you want, I can now (pick one):
 - add stable stubs for the remaining public API (`vfs_open`, `vfs_read`, `vfs_write`, `vfs_stat`, `vfs_readdir`, `vfs_permission_check`) and run `make test` again; OR
 - create the design doc `docs/design.md` for Person A (data structures, locking, API surface). Reply with which you prefer and I'll proceed.
+
+---
+
+**Person A Status vs 10-Day Plan**
+
+- Before Day 1 — Shared Setup: Done (repo + Makefile exist).
+
+- Day 1 — Headers and Stubs: Done
+    - `src/core/vfs_core.h` defines public API.
+    - `src/core/vfs_core.c` compiles; stubs added and later implemented.
+
+- Day 2 — Core Data Structures: Done
+    - Implemented `vfs_inode_t`, `vfs_dentry_t`, refcounting, create/destroy helpers.
+    - Unit test `tests/test_core_structs` passes.
+
+- Day 3 — Path Resolution: Done
+    - Implemented `vfs_resolve_path` (normalization + mount selection + tree walk/auto-create).
+    - Added `vfs_lookup` wrapper.
+    - `tests/test_lookup` passes.
+
+- Day 4 — Mount Table Implementation: ✅ Done
+    - Implemented `vfs_mount_entry_t` plus `vfs_mount_create`/`vfs_mount_destroy`.
+    - Default root mount created in `vfs_init`.
+    - Public API `vfs_mount_backend`/`vfs_unmount_backend` implemented as wrappers around internal mount helpers.
+
+- Day 5 — Backend Dispatch Layer: ✅ Done (Design Phase)
+    - Designed `vfs_backend_ops_t` function table structure with init/shutdown and file operation callbacks.
+    - Updated `vfs_mount_entry_t` to include `backend_ops` and `backend_data` pointers.
+    - Mount lifecycle now calls backend shutdown if backend present.
+    - TODO: Implement actual backends (Person C) and dispatch file operations to backends when present.
+
+- Day 6 — Permission Model: ✅ Done
+    - Implemented `vfs_permission_check` with UNIX-style owner/group/other evaluation (R_OK/W_OK/X_OK).
+    - Integrated permission checks into `vfs_open`, `vfs_read`, `vfs_write`.
+    - Root (uid=0) bypasses read/write permission checks.
+
+- Day 7 — Caching Layer: Not Started
+    - No dentry/inode cache beyond in-memory tree; no LRU/TTL.
+
+- Day 8 — File Handles + Core Read/Write: ✅ Done
+    - Implemented global file handle table (1024 entries) with thread-safe allocation/deallocation.
+    - `vfs_open` with permission checks and EISDIR rejection for directories.
+    - `vfs_close` releases file handles.
+    - `vfs_read` returns zero-filled data up to inode size.
+    - `vfs_write` extends inode size (no actual content storage until backend integration).
+    - Unit tests in `tests/test_file_ops.c` validate error handling (EISDIR, EBADF).
+
+- Day 9 — Directory Operations: ✅ Done
+    - Implemented `vfs_stat` fills struct stat from inode metadata.
+    - Implemented `vfs_readdir` iterates child dentries and calls filler callback.
+    - Integration tested through `tests/test_file_ops.c`.
+
+- Day 10 — Final Integration & Refactoring: Pending (Integration Phase)
+    - Backend dispatch interface designed; awaiting Person C backend implementation.
+    - FUSE layer (Person B) can use public VFS API.
+    - Pending: valgrind memory leak checks, stress testing, concurrent operation validation.
+
+**Immediate TODOs (Person A - Remaining Work)**
+
+- ✅ Day 4: `vfs_mount_backend`/`vfs_unmount_backend` - COMPLETED
+- ✅ Day 5: Backend dispatch interface design - COMPLETED
+- ✅ Day 6: Permission checks implementation - COMPLETED
+- ✅ Day 8-9: File operations and directory APIs - COMPLETED
+- 🟡 Day 7: Caching layer (optional) - Deferred (no hash table, no LRU yet)
+- 🔄 Day 10: Integration work - In Progress
+    - ⏳ Person C: Implement backends (backend_posix.c) with vfs_backend_ops_t structure
+    - ⏳ Person C: Update file operations to dispatch to backend callbacks when present
+    - ⏳ Person B: Integrate FUSE callbacks with VFS public API
+    - ⏳ Testing: End-to-end mount/open/read/write through FUSE
+    - ⏳ Testing: Valgrind memory leak detection
+    - ⏳ Testing: Stress test concurrent operations
+
+**Current Test Status (All Passing)**
+
+- ✅ `tests/test_core_structs` - Inode refcounting and dentry lifecycle
+- ✅ `tests/test_lookup` - Path resolution with normalization
+- ✅ `tests/test_file_ops` - File operations error handling

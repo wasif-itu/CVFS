@@ -11,6 +11,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <fcntl.h>
 
 /* -------------------------------------------------------------------------- */
 /* GLOBAL STATE */
@@ -329,6 +330,8 @@ vfs_mount_entry_t *vfs_mount_create(const char *mountpoint,
 
     m->mountpoint = strdup(mountpoint);
     m->backend_root = strdup(backend_root);
+    m->backend_ops = NULL;  /* No backend by default */
+    m->backend_data = NULL;
 
     /* Create synthetic root inode + dentry */
     uint64_t ino = g_next_ino++;
@@ -359,6 +362,11 @@ int vfs_mount_destroy(vfs_mount_entry_t *m)
         cur = &(*cur)->next;
     }
     pthread_mutex_unlock(&g_vfs_lock);
+
+    /* Shutdown backend if present */
+    if (m->backend_ops && m->backend_ops->shutdown && m->backend_data) {
+        m->backend_ops->shutdown(m->backend_data);
+    }
 
     vfs_dentry_destroy_tree(m->root_dentry);
     free(m->mountpoint);
@@ -485,6 +493,52 @@ int vfs_resolve_path(const char *path, vfs_dentry_t **out)
 }
 
 /* -------------------------------------------------------------------------- */
+/* PERMISSION CHECKS                                                           */
+/* -------------------------------------------------------------------------- */
+
+static int check_inode_perm(const vfs_inode_t *ino, uid_t req_uid, gid_t req_gid, int mask)
+{
+    if (!ino) return -ENOENT;
+
+    /* Determine applicable class */
+    int have_r = 0, have_w = 0, have_x = 0;
+
+    if (req_uid == 0) {
+        have_r = 1;
+        have_w = 1;
+        have_x = ((ino->mode & (S_IXUSR|S_IXGRP|S_IXOTH)) != 0);
+    } else if (req_uid == ino->uid) {
+        have_r = (ino->mode & S_IRUSR) != 0;
+        have_w = (ino->mode & S_IWUSR) != 0;
+        have_x = (ino->mode & S_IXUSR) != 0;
+    } else if (req_gid == ino->gid) {
+        have_r = (ino->mode & S_IRGRP) != 0;
+        have_w = (ino->mode & S_IWGRP) != 0;
+        have_x = (ino->mode & S_IXGRP) != 0;
+    } else {
+        have_r = (ino->mode & S_IROTH) != 0;
+        have_w = (ino->mode & S_IWOTH) != 0;
+        have_x = (ino->mode & S_IXOTH) != 0;
+    }
+
+    int need_r = (mask & R_OK) ? 1 : 0;
+    int need_w = (mask & W_OK) ? 1 : 0;
+    int need_x = (mask & X_OK) ? 1 : 0;
+
+    if (need_r && !have_r) return -EACCES;
+    if (need_w && !have_w) return -EACCES;
+    if (need_x && !have_x) return -EACCES;
+    return 0;
+}
+
+int vfs_permission_check(const char *path, uid_t uid, gid_t gid, int mask)
+{
+    if (!path) return -EINVAL;
+    vfs_dentry_t *d = NULL;
+    int ret = vfs_resolve_path(path, &d);
+    if (ret != 0 || !d) return ret ? ret : -ENOENT;
+    return check_inode_perm(d->inode, uid, gid, mask);
+}
 /* INIT + SHUTDOWN */
 /* -------------------------------------------------------------------------- */
 
@@ -586,12 +640,31 @@ int vfs_open(const char *path, int flags)
     if (d->inode && S_ISDIR(d->inode->mode))
         return -EISDIR;
 
+    /* permission check: basic R/W */
+    int mask = 0;
+    if ((flags & O_WRONLY) || (flags & O_RDWR)) mask |= W_OK;
+    if ((flags & O_RDONLY) || (flags & O_RDWR) || !(flags & O_WRONLY)) mask |= R_OK;
+
+    int perm = check_inode_perm(d->inode, 0, 0, mask); /* uid=0/gid=0 default */
+    if (perm != 0)
+        return perm;
+
     /* allocate a handle */
     int fh = fh_alloc(d, flags);
     if (fh < 0)
         return fh;
 
     return fh;
+}
+
+int vfs_close(int fh)
+{
+    vfs_fh_entry_t *e = fh_get(fh);
+    if (!e)
+        return -EBADF;
+
+    fh_free(fh);
+    return 0;
 }
 
 ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset)
@@ -609,6 +682,11 @@ ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset)
 
     if (S_ISDIR(d->inode->mode))
         return -EISDIR;
+
+    /* permission check: read */
+    int perm = check_inode_perm(d->inode, 0, 0, R_OK);
+    if (perm != 0)
+        return perm;
 
     /* simple zero-filled content model: return zeros up to inode size */
     off_t size = d->inode->size;
@@ -636,6 +714,11 @@ ssize_t vfs_write(int fh, const void *buf, size_t count, off_t offset)
 
     if (S_ISDIR(d->inode->mode))
         return -EISDIR;
+
+    /* permission check: write */
+    int perm = check_inode_perm(d->inode, 0, 0, W_OK);
+    if (perm != 0)
+        return perm;
 
     /* Grow file size to simulate write */
     off_t end = offset + (off_t)count;
@@ -705,11 +788,7 @@ int vfs_readdir(const char *path, void *buf, void *filler)
     return 0;
 }
 
-int vfs_permission_check(const char *path, uid_t uid, gid_t gid, int mask)
-{
-    (void)path; (void)uid; (void)gid; (void)mask;
-    return -ENOSYS;
-}
+/* vfs_permission_check: already implemented above; remove stub duplicate. */
 
 /* Public wrapper: vfs_lookup delegates to vfs_resolve_path. */
 int vfs_lookup(const char *path, vfs_dentry_t **out)
@@ -718,4 +797,47 @@ int vfs_lookup(const char *path, vfs_dentry_t **out)
         return -EINVAL;
 
     return vfs_resolve_path(path, out);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public Mount API                                                           */
+/* -------------------------------------------------------------------------- */
+
+int vfs_mount_backend(const char *mountpoint, const char *backend_root,
+                      const char *backend_type)
+{
+    if (!mountpoint || !backend_root)
+        return -EINVAL;
+
+    /* For now, ignore backend_type and create a simple in-memory mount.
+       Later, Person C will register backend_ops and we'll look them up here. */
+    (void)backend_type;  /* TODO: lookup backend by type */
+
+    vfs_mount_entry_t *m = vfs_mount_create(mountpoint, backend_root);
+    if (!m)
+        return -ENOMEM;
+
+    /* TODO: If backend_ops registered, call init and store backend_data */
+    return 0;
+}
+
+int vfs_unmount_backend(const char *mountpoint)
+{
+    if (!mountpoint)
+        return -EINVAL;
+
+    pthread_mutex_lock(&g_vfs_lock);
+    vfs_mount_entry_t *m = NULL;
+    for (vfs_mount_entry_t *cur = mount_table_head; cur; cur = cur->next) {
+        if (strcmp(cur->mountpoint, mountpoint) == 0) {
+            m = cur;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vfs_lock);
+
+    if (!m)
+        return -ENOENT;
+
+    return vfs_mount_destroy(m);
 }

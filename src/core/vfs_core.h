@@ -19,6 +19,28 @@
 /* Forward declarations */
 struct vfs_dentry;
 struct vfs_mount;
+struct vfs_backend_ops;
+
+/* ----------------------------------
+ * Backend Operations Function Table
+ * ---------------------------------- */
+typedef struct vfs_backend_ops {
+    const char *name;  /* Backend type name (e.g., "posix", "ext2") */
+    
+    /* Lifecycle */
+    int (*init)(const char *root_path, void **backend_data);
+    int (*shutdown)(void *backend_data);
+    
+    /* File operations */
+    int (*open)(void *backend_data, const char *relpath, int flags, void **handle);
+    int (*close)(void *backend_data, void *handle);
+    ssize_t (*read)(void *backend_data, void *handle, void *buf, size_t count, off_t offset);
+    ssize_t (*write)(void *backend_data, void *handle, const void *buf, size_t count, off_t offset);
+    
+    /* Metadata operations */
+    int (*stat)(void *backend_data, const char *relpath, struct stat *st);
+    int (*readdir)(void *backend_data, const char *relpath, void *buf, void *filler);
+} vfs_backend_ops_t;
 
 /* ----------------------------------
  * Inode structure
@@ -56,7 +78,8 @@ typedef struct vfs_dentry {
 typedef struct vfs_mount {
     char *mountpoint;            /* e.g. "/mnt" */
     char *backend_root;          /* physical path on host fs */
-    void *backend_ops;           /* backend function table (unused for now) */
+    const vfs_backend_ops_t *backend_ops;  /* backend function table */
+    void *backend_data;          /* backend-specific private data */
 
     vfs_dentry_t *root_dentry;   /* root of mount */
 
@@ -83,6 +106,11 @@ int vfs_shutdown(void);
 vfs_mount_entry_t* vfs_mount_create(const char *mountpoint,
                                     const char *backend_root);
 int vfs_mount_destroy(vfs_mount_entry_t *m);
+
+/* Public mount API */
+int vfs_mount_backend(const char *mountpoint, const char *backend_root, 
+                      const char *backend_type);
+int vfs_unmount_backend(const char *mountpoint);
 
 /* ----------------------------------
  * Inode helpers
@@ -134,6 +162,7 @@ int vfs_lookup(const char *path, vfs_dentry_t **out);
  * the full implementations are being developed.
  * ---------------------------------- */
 int vfs_open(const char *path, int flags);
+int vfs_close(int fh);
 ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset);
 ssize_t vfs_write(int fh, const void *buf, size_t count, off_t offset);
 int vfs_stat(const char *path, struct stat *st);
