@@ -112,6 +112,9 @@ int vfs_mount_backend(const char *mountpoint, const char *backend_root,
                       const char *backend_type);
 int vfs_unmount_backend(const char *mountpoint);
 
+/* Register a backend with the VFS */
+int vfs_register_backend(const vfs_backend_ops_t *ops);
+
 /* ----------------------------------
  * Inode helpers
  * ---------------------------------- */
@@ -120,8 +123,8 @@ vfs_inode_t* vfs_inode_create(uint64_t ino, mode_t mode,
 void vfs_inode_acquire(vfs_inode_t *inode);
 void vfs_inode_release(vfs_inode_t *inode);
 
-/* Convenience alias used by some tests: release an inode via dentry API */
-void vfs_dentry_release(vfs_inode_t *inode);
+/* Release a dentry reference (frees orphaned dentries) */
+void vfs_dentry_release(vfs_dentry_t *dentry);
 
 /* ----------------------------------
  * Dentry helpers
@@ -166,7 +169,20 @@ int vfs_close(int fh);
 ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset);
 ssize_t vfs_write(int fh, const void *buf, size_t count, off_t offset);
 int vfs_stat(const char *path, struct stat *st);
-int vfs_readdir(const char *path, void *buf, void *filler);
+int vfs_readdir(const char *path, void *buf, void *filler, off_t offset, void *fi);
 int vfs_permission_check(const char *path, uid_t uid, gid_t gid, int mask);
+
+/* ----------------------------------
+ * FUSE-compatible API extensions
+ * ---------------------------------- */
+struct fuse_file_info; /* forward declaration */
+
+int vfs_destroy(void);                    /* alias for vfs_shutdown */
+int vfs_getattr(const char *path, struct stat *stbuf);  /* alias for vfs_stat */
+int vfs_create(const char *path, mode_t mode, struct fuse_file_info *fi);
+int vfs_mkdir(const char *path, mode_t mode);
+int vfs_mknod(const char *path, mode_t mode, dev_t rdev);
+ssize_t vfs_readlink(const char *path, char *buf, size_t size);
+int vfs_symlink(const char *target, const char *linkpath);
 
 #endif /* VFS_CORE_H */

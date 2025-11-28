@@ -3,25 +3,6 @@
 #include <string.h>
 #include "vfs_core.h"
 
-// Simple helper to cleanup a tree recursively
-static void free_dentry_tree(vfs_dentry_t *d) {
-    if (!d) return;
-
-    pthread_mutex_lock(&d->lock);
-    vfs_dentry_t *child = d->child;
-    while (child) {
-        vfs_dentry_t *next = child->sibling;
-        free_dentry_tree(child);
-        child = next;
-    }
-    pthread_mutex_unlock(&d->lock);
-
-    vfs_dentry_release(d->inode);
-    free(d->name);
-    pthread_mutex_destroy(&d->lock);
-    free(d);
-}
-
 int main() {
     printf("Running vfs_resolve_path() tests...\n");
 
@@ -54,12 +35,7 @@ int main() {
 
     printf("All tests passed!\n");
 
-    // Cleanup
-    for (mount_entry_t *m = mount_table_head; m != NULL; m = m->next) {
-        free_dentry_tree(m->root_dentry);
-        m->root_dentry = NULL;
-    }
-
+    // Cleanup - vfs_shutdown handles dentry tree cleanup
     vfs_shutdown();
     return 0;
 }

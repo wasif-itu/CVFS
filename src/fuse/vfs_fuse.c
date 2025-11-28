@@ -118,9 +118,10 @@ int my_fuse_write(const char *path, const char *buf, size_t size, off_t offset, 
 int my_fuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                     off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags)
 {
-    (void)fi;
     (void)flags;
-    int r = vfs_readdir(path, buf, filler, offset, fi);
+    fprintf(stderr, "[vfs_fuse] readdir: %s\n", path);
+    int r = vfs_readdir(path, buf, (void*)filler, offset, (void*)fi);
+    fprintf(stderr, "[vfs_fuse] readdir result: %d\n", r);
     if (r == 0)
         return 0;
     return vfs_to_fuse_err(r);

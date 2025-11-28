@@ -411,3 +411,120 @@ int posix_mkdir(int backend_id, const char *relpath, mode_t mode) {
     if (mkdir(full, mode) != 0) return -1;
     return 0;
 }
+
+/* ========================================================================
+ * VFS Backend Ops Adapters
+ * ======================================================================== */
+
+#include "../core/vfs_core.h"
+#include <stdint.h>
+
+/* Adapter: init - wraps posix_backend_init */
+static int posix_ops_init(const char *root_path, void **backend_data) {
+    if (!backend_data) return -EINVAL;
+    
+    int backend_id = posix_backend_init(root_path);
+    if (backend_id < 0) return -errno;
+    
+    /* Store backend_id as opaque pointer */
+    *backend_data = (void *)(intptr_t)backend_id;
+    return 0;
+}
+
+/* Adapter: shutdown - wraps posix_backend_shutdown */
+static int posix_ops_shutdown(void *backend_data) {
+    if (!backend_data) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    return posix_backend_shutdown(backend_id);
+}
+
+/* Adapter: open - wraps posix_open */
+static int posix_ops_open(void *backend_data, const char *relpath, int flags, void **handle) {
+    if (!backend_data || !handle) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    /* posix_open expects mode for O_CREAT, use default 0644 */
+    mode_t mode = 0644;
+    
+    int h = posix_open(backend_id, relpath, flags, mode);
+    if (h < 0) return -errno;
+    
+    *handle = (void *)(intptr_t)h;
+    return 0;
+}
+
+/* Adapter: close - wraps posix_close */
+static int posix_ops_close(void *backend_data, void *handle) {
+    if (!backend_data || !handle) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    int h = (int)(intptr_t)handle;
+    
+    int ret = posix_close(backend_id, h);
+    return (ret < 0) ? -errno : 0;
+}
+
+/* Adapter: read - wraps posix_read */
+static ssize_t posix_ops_read(void *backend_data, void *handle, void *buf, 
+                               size_t count, off_t offset) {
+    if (!backend_data || !handle || !buf) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    int h = (int)(intptr_t)handle;
+    
+    ssize_t ret = posix_read(backend_id, h, buf, count, offset);
+    return (ret < 0) ? -errno : ret;
+}
+
+/* Adapter: write - wraps posix_write */
+static ssize_t posix_ops_write(void *backend_data, void *handle, const void *buf,
+                                size_t count, off_t offset) {
+    if (!backend_data || !handle || !buf) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    int h = (int)(intptr_t)handle;
+    
+    ssize_t ret = posix_write(backend_id, h, buf, count, offset);
+    return (ret < 0) ? -errno : ret;
+}
+
+/* Adapter: stat - wraps posix_stat */
+static int posix_ops_stat(void *backend_data, const char *relpath, struct stat *st) {
+    if (!backend_data || !relpath || !st) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    int ret = posix_stat(backend_id, relpath, st);
+    return (ret < 0) ? -errno : 0;
+}
+
+/* Adapter: readdir - wraps posix_readdir */
+static int posix_ops_readdir(void *backend_data, const char *relpath, 
+                              void *buf, void *filler) {
+    if (!backend_data || !relpath || !filler) return -EINVAL;
+    
+    int backend_id = (int)(intptr_t)backend_data;
+    /* Cast filler to vfs_fill_dir_t (matches fuse_fill_dir_t signature) */
+    vfs_fill_dir_t fill_fn = (vfs_fill_dir_t)filler;
+    
+    int ret = posix_readdir(backend_id, relpath, buf, fill_fn, 0);
+    return (ret < 0) ? -errno : 0;
+}
+
+/* Global backend ops structure */
+const vfs_backend_ops_t posix_backend_ops = {
+    .name = "posix",
+    .init = posix_ops_init,
+    .shutdown = posix_ops_shutdown,
+    .open = posix_ops_open,
+    .close = posix_ops_close,
+    .read = posix_ops_read,
+    .write = posix_ops_write,
+    .stat = posix_ops_stat,
+    .readdir = posix_ops_readdir,
+};
+
+/* Getter function for backend ops */
+const vfs_backend_ops_t *get_posix_backend_ops(void) {
+    return &posix_backend_ops;
+}

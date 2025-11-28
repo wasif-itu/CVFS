@@ -51,5 +51,10 @@ int posix_rename(int backend_id, const char *old_relpath, const char *new_relpat
 /* Make directory. Returns 0 on success */
 int posix_mkdir(int backend_id, const char *relpath, mode_t mode);
 
+/* Forward declaration for VFS integration */
+struct vfs_backend_ops;
+
+/* Get the VFS backend ops structure for POSIX backend */
+const struct vfs_backend_ops *get_posix_backend_ops(void);
 
 #endif /* BACKEND_POSIX_H */

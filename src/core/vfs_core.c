@@ -23,6 +23,64 @@ static uint64_t g_next_ino = 1000;
 static int g_vfs_inited = 0;
 
 /* -------------------------------------------------------------------------- */
+/* BACKEND REGISTRY */
+/* -------------------------------------------------------------------------- */
+#define MAX_BACKENDS 8
+
+static struct {
+    const vfs_backend_ops_t *ops;
+    int registered;
+} g_backend_registry[MAX_BACKENDS];
+
+static pthread_mutex_t g_backend_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Register a backend operations structure */
+int vfs_register_backend(const vfs_backend_ops_t *ops) {
+    if (!ops || !ops->name) return -EINVAL;
+    
+    pthread_mutex_lock(&g_backend_lock);
+    
+    /* Check if already registered */
+    for (int i = 0; i < MAX_BACKENDS; i++) {
+        if (g_backend_registry[i].registered && 
+            strcmp(g_backend_registry[i].ops->name, ops->name) == 0) {
+            pthread_mutex_unlock(&g_backend_lock);
+            return -EEXIST;
+        }
+    }
+    
+    /* Find free slot */
+    for (int i = 0; i < MAX_BACKENDS; i++) {
+        if (!g_backend_registry[i].registered) {
+            g_backend_registry[i].ops = ops;
+            g_backend_registry[i].registered = 1;
+            pthread_mutex_unlock(&g_backend_lock);
+            return 0;
+        }
+    }
+    
+    pthread_mutex_unlock(&g_backend_lock);
+    return -ENOMEM;
+}
+
+/* Lookup backend by name */
+static const vfs_backend_ops_t *vfs_find_backend(const char *name) {
+    if (!name) return NULL;
+    
+    pthread_mutex_lock(&g_backend_lock);
+    for (int i = 0; i < MAX_BACKENDS; i++) {
+        if (g_backend_registry[i].registered && 
+            strcmp(g_backend_registry[i].ops->name, name) == 0) {
+            const vfs_backend_ops_t *ops = g_backend_registry[i].ops;
+            pthread_mutex_unlock(&g_backend_lock);
+            return ops;
+        }
+    }
+    pthread_mutex_unlock(&g_backend_lock);
+    return NULL;
+}
+
+/* -------------------------------------------------------------------------- */
 /* File handle table (simple)                                                  */
 /* -------------------------------------------------------------------------- */
 #define VFS_MAX_FH 1024
@@ -84,11 +142,17 @@ static void fh_free(int fh)
     vfs_fh_entry_t *e = fh_get(fh);
     if (!e) return;
     pthread_mutex_lock(&e->lock);
+    vfs_dentry_t *d = e->dentry;
     e->in_use = 0;
     e->dentry = NULL;
     e->flags = 0;
     e->pos = 0;
     pthread_mutex_unlock(&e->lock);
+    
+    /* Release dentry reference held by file handle */
+    if (d) {
+        vfs_dentry_release(d);
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -275,6 +339,15 @@ void vfs_dentry_remove_child(vfs_dentry_t *parent, vfs_dentry_t *child)
     pthread_mutex_unlock(&parent->lock);
 }
 
+static void destroy_dentry_only(vfs_dentry_t *d)
+{
+    pthread_mutex_destroy(&d->lock);
+    if (d->inode)
+        vfs_inode_release(d->inode);
+    free(d->name);
+    free(d);
+}
+
 void vfs_dentry_destroy(vfs_dentry_t *dentry)
 {
     if (!dentry)
@@ -289,19 +362,18 @@ void vfs_dentry_destroy(vfs_dentry_t *dentry)
     vfs_dentry_destroy_tree(dentry);
 }
 
-void vfs_dentry_release(vfs_inode_t *inode)
+void vfs_dentry_release(vfs_dentry_t *dentry)
 {
-    /* Small wrapper to match older test expectations */
-    vfs_inode_release(inode);
-}
-
-static void destroy_dentry_only(vfs_dentry_t *d)
-{
-    pthread_mutex_destroy(&d->lock);
-    if (d->inode)
-        vfs_inode_release(d->inode);
-    free(d->name);
-    free(d);
+    if (!dentry) return;
+    
+    /* For orphaned dentries (no parent), free them directly */
+    if (!dentry->parent) {
+        destroy_dentry_only(dentry);
+        return;
+    }
+    
+    /* For dentries with parents, they'll be cleaned up with the tree */
+    /* This is a no-op for now - could implement ref counting later */
 }
 
 void vfs_dentry_destroy_tree(vfs_dentry_t *root)
@@ -408,6 +480,35 @@ static vfs_mount_entry_t *find_best_mount(const char *path)
     return best;
 }
 
+/* Calculate relative path within mount 
+ * Returns newly allocated string or NULL on error 
+ * Caller must free the returned string.
+ */
+static char *get_relpath_for_mount(const char *full_path, vfs_mount_entry_t *mount) {
+    if (!full_path || !mount || !mount->mountpoint) return NULL;
+    
+    const char *mp = mount->mountpoint;
+    size_t mp_len = strlen(mp);
+    
+    /* Root mount special case */
+    if (strcmp(mp, "/") == 0) {
+        /* Skip leading slash */
+        const char *rel = (full_path[0] == '/' && full_path[1]) ? full_path + 1 : full_path;
+        return strdup(rel[0] ? rel : ".");
+    }
+    
+    /* Check if path starts with mountpoint */
+    if (strncmp(full_path, mp, mp_len) != 0) {
+        return NULL;
+    }
+    
+    /* Extract relative part */
+    const char *rel = full_path + mp_len;
+    while (*rel == '/') rel++; /* skip separator */
+    
+    return strdup(rel[0] ? rel : ".");
+}
+
 /* -------------------------------------------------------------------------- */
 /* PATH RESOLUTION */
 /* -------------------------------------------------------------------------- */
@@ -432,10 +533,7 @@ int vfs_resolve_path(const char *path, vfs_dentry_t **out)
 
     /* Direct hit: mount root */
     if (!strcmp(norm, "/") || !strcmp(norm, m->mountpoint)) {
-        vfs_inode_t *ino = m->root_dentry->inode;
-        vfs_inode_acquire(ino);
-        *out = vfs_dentry_create("/", NULL, ino);
-        vfs_inode_release(ino);
+        *out = m->root_dentry;
         free(norm);
         return 0;
     }
@@ -552,6 +650,21 @@ int vfs_init(void)
     g_vfs_inited = 1;
     pthread_mutex_unlock(&g_vfs_lock);
 
+    /* Initialize file handle table */
+    fh_table_init_once();
+
+    /* Register POSIX backend */
+    extern const vfs_backend_ops_t *get_posix_backend_ops(void);
+    const vfs_backend_ops_t *posix_ops = get_posix_backend_ops();
+    if (posix_ops) {
+        int ret = vfs_register_backend(posix_ops);
+        if (ret < 0 && ret != -EEXIST) {
+            fprintf(stderr, "vfs_init: failed to register posix backend: %d\n", ret);
+        } else {
+            fprintf(stderr, "[vfs_init] POSIX backend registered successfully\n");
+        }
+    }
+
     /* Create default mount + sample tree */
     vfs_mount_entry_t *rootm = vfs_mount_create("/", ".");
     if (!rootm)
@@ -608,10 +721,26 @@ int vfs_shutdown(void)
         vfs_mount_entry_t *m = mount_table_head;
         mount_table_head = m->next;
 
+        /* Shutdown backend if present */
+        if (m->backend_ops && m->backend_ops->shutdown && m->backend_data) {
+            m->backend_ops->shutdown(m->backend_data);
+        }
+
         vfs_dentry_destroy_tree(m->root_dentry);
         free(m->mountpoint);
         free(m->backend_root);
         free(m);
+    }
+
+    /* Clean up file handle table */
+    for (int i = 0; i < VFS_MAX_FH; i++) {
+        if (g_fh_table[i].in_use) {
+            if (g_fh_table[i].dentry) {
+                vfs_dentry_release(g_fh_table[i].dentry);
+            }
+            g_fh_table[i].in_use = 0;
+            g_fh_table[i].dentry = NULL;
+        }
     }
 
     pthread_mutex_unlock(&g_vfs_lock);
@@ -631,6 +760,39 @@ int vfs_open(const char *path, int flags)
     if (!g_vfs_inited)
         return -EIO;
 
+    /* Check if mount has backend - for O_CREAT, dispatch directly to backend */
+    vfs_mount_entry_t *mount = find_best_mount(path);
+    if (mount && mount->backend_ops && mount->backend_ops->open && (flags & O_CREAT)) {
+        /* Creating file through backend - don't auto-create VFS dentry yet */
+        char *relpath = get_relpath_for_mount(path, mount);
+        if (!relpath) return -EINVAL;
+        
+        void *backend_handle = NULL;
+        int ret = mount->backend_ops->open(mount->backend_data, relpath, flags, &backend_handle);
+        free(relpath);
+        
+        if (ret < 0) return ret;
+        
+        /* Now create VFS dentry for the file */
+        uint64_t ino = g_next_ino++;
+        vfs_inode_t *inode = vfs_inode_create(ino, S_IFREG | 0644, 0, 0, 0);
+        if (!inode) return -ENOMEM;
+        inode->backend_handle = backend_handle;
+        
+        /* Extract filename */
+        const char *name = strrchr(path, '/');
+        name = name ? name + 1 : path;
+        
+        vfs_dentry_t *d = vfs_dentry_create(name, NULL, inode);
+        vfs_inode_release(inode);
+        if (!d) return -ENOMEM;
+        
+        /* Allocate handle */
+        int fh = fh_alloc(d, flags);
+        return fh;
+    }
+
+    /* Normal path: resolve and open existing file */
     vfs_dentry_t *d = NULL;
     int ret = vfs_resolve_path(path, &d);
     if (ret != 0 || !d)
@@ -648,6 +810,20 @@ int vfs_open(const char *path, int flags)
     int perm = check_inode_perm(d->inode, 0, 0, mask); /* uid=0/gid=0 default */
     if (perm != 0)
         return perm;
+
+    /* For existing files with backend, get backend handle */
+    if (mount && mount->backend_ops && mount->backend_ops->open && !d->inode->backend_handle) {
+        char *relpath = get_relpath_for_mount(path, mount);
+        if (!relpath) return -EINVAL;
+        
+        void *backend_handle = NULL;
+        ret = mount->backend_ops->open(mount->backend_data, relpath, flags, &backend_handle);
+        free(relpath);
+        
+        if (ret < 0) return ret;
+        
+        d->inode->backend_handle = backend_handle;
+    }
 
     /* allocate a handle */
     int fh = fh_alloc(d, flags);
@@ -688,7 +864,24 @@ ssize_t vfs_read(int fh, void *buf, size_t count, off_t offset)
     if (perm != 0)
         return perm;
 
-    /* simple zero-filled content model: return zeros up to inode size */
+    /* Check if backend handle is available */
+    if (d->inode->backend_handle) {
+        /* Find mount to get backend ops - simplified: we know handle exists so backend must */
+        /* We could store mount ref in dentry, but for now iterate mounts */
+        pthread_mutex_lock(&g_vfs_lock);
+        for (vfs_mount_entry_t *m = mount_table_head; m; m = m->next) {
+            if (m->backend_ops && m->backend_ops->read) {
+                ssize_t result = m->backend_ops->read(m->backend_data, 
+                                                      d->inode->backend_handle,
+                                                      buf, count, offset);
+                pthread_mutex_unlock(&g_vfs_lock);
+                return result;
+            }
+        }
+        pthread_mutex_unlock(&g_vfs_lock);
+    }
+
+    /* Fallback: simple zero-filled content model */
     off_t size = d->inode->size;
     if (offset >= size)
         return 0;
@@ -720,7 +913,28 @@ ssize_t vfs_write(int fh, const void *buf, size_t count, off_t offset)
     if (perm != 0)
         return perm;
 
-    /* Grow file size to simulate write */
+    /* Check if backend handle is available */
+    if (d->inode->backend_handle) {
+        pthread_mutex_lock(&g_vfs_lock);
+        for (vfs_mount_entry_t *m = mount_table_head; m; m = m->next) {
+            if (m->backend_ops && m->backend_ops->write) {
+                ssize_t written = m->backend_ops->write(m->backend_data,
+                                                         d->inode->backend_handle,
+                                                         buf, count, offset);
+                pthread_mutex_unlock(&g_vfs_lock);
+                if (written > 0) {
+                    /* Update size */
+                    off_t new_size = offset + written;
+                    if (new_size > d->inode->size)
+                        d->inode->size = new_size;
+                }
+                return written;
+            }
+        }
+        pthread_mutex_unlock(&g_vfs_lock);
+    }
+
+    /* Fallback: Grow file size to simulate write */
     off_t end = offset + (off_t)count;
     if (end > d->inode->size)
         d->inode->size = end;
@@ -734,6 +948,19 @@ int vfs_stat(const char *path, struct stat *st)
     if (!path || !st)
         return -EINVAL;
 
+    /* Check if backend can provide stat */
+    vfs_mount_entry_t *mount = find_best_mount(path);
+    if (mount && mount->backend_ops && mount->backend_ops->stat) {
+        char *relpath = get_relpath_for_mount(path, mount);
+        if (relpath) {
+            int ret = mount->backend_ops->stat(mount->backend_data, relpath, st);
+            free(relpath);
+            if (ret == 0) return 0;
+            /* If backend fails, fall through to in-memory */
+        }
+    }
+
+    /* Fallback: in-memory stat */
     vfs_dentry_t *d = NULL;
     int ret = vfs_resolve_path(path, &d);
     if (ret != 0 || !d)
@@ -751,11 +978,27 @@ int vfs_stat(const char *path, struct stat *st)
     return 0;
 }
 
-int vfs_readdir(const char *path, void *buf, void *filler)
+int vfs_readdir(const char *path, void *buf, void *filler, off_t offset, void *fi)
 {
+    (void)offset;  /* Simple implementation - ignore offset */
+    (void)fi;      /* Not using file info */
+    
     if (!path || !buf || !filler)
         return -EINVAL;
 
+    /* Check if backend can provide readdir */
+    vfs_mount_entry_t *mount = find_best_mount(path);
+    if (mount && mount->backend_ops && mount->backend_ops->readdir) {
+        char *relpath = get_relpath_for_mount(path, mount);
+        if (relpath) {
+            int ret = mount->backend_ops->readdir(mount->backend_data, relpath, buf, filler);
+            free(relpath);
+            if (ret == 0) return 0;
+            /* If backend fails, fall through to in-memory */
+        }
+    }
+
+    /* Fallback: in-memory readdir */
     vfs_dentry_t *d = NULL;
     int ret = vfs_resolve_path(path, &d);
     if (ret != 0 || !d)
@@ -767,21 +1010,24 @@ int vfs_readdir(const char *path, void *buf, void *filler)
     if (!S_ISDIR(d->inode->mode))
         return -ENOTDIR;
 
-    /* filler: int (*)(void *buf, const char *name, const struct stat *st, off_t off) */
-    typedef int (*fill_fn_t)(void *, const char *, const struct stat *, off_t);
+    /* FUSE3 filler: int (*)(void *buf, const char *name, const struct stat *st, off_t off, enum flags) */
+    typedef int (*fill_fn_t)(void *, const char *, const struct stat *, off_t, int);
     fill_fn_t fill = (fill_fn_t)filler;
 
+    /* Add . and .. entries (pass 0 for flags) */
+    if (fill(buf, ".", NULL, 0, 0) != 0) {
+        /* Buffer full on first entry - this shouldn't happen */
+        return -EIO;
+    }
+    fill(buf, "..", NULL, 0, 0);
+
+    /* Add child entries */
     pthread_mutex_lock(&d->lock);
     for (vfs_dentry_t *c = d->child; c; c = c->sibling) {
-        struct stat stbuf;
-        memset(&stbuf, 0, sizeof(stbuf));
-        if (c->inode) {
-            stbuf.st_mode = c->inode->mode;
-            stbuf.st_size = c->inode->size;
-            stbuf.st_ino = c->inode->ino;
+        if (fill(buf, c->name, NULL, 0, 0) != 0) {
+            /* Buffer full - stop adding but return success */
+            break;
         }
-        /* ignore return; fuse filler returns non-zero to stop */
-        fill(buf, c->name, &stbuf, 0);
     }
     pthread_mutex_unlock(&d->lock);
 
@@ -806,18 +1052,32 @@ int vfs_lookup(const char *path, vfs_dentry_t **out)
 int vfs_mount_backend(const char *mountpoint, const char *backend_root,
                       const char *backend_type)
 {
-    if (!mountpoint || !backend_root)
+    if (!mountpoint || !backend_root || !backend_type)
         return -EINVAL;
 
-    /* For now, ignore backend_type and create a simple in-memory mount.
-       Later, Person C will register backend_ops and we'll look them up here. */
-    (void)backend_type;  /* TODO: lookup backend by type */
+    /* Lookup registered backend */
+    const vfs_backend_ops_t *ops = vfs_find_backend(backend_type);
+    if (!ops) {
+        fprintf(stderr, "vfs_mount_backend: backend '%s' not registered\n", backend_type);
+        return -ENODEV;
+    }
 
+    /* Create mount structure */
     vfs_mount_entry_t *m = vfs_mount_create(mountpoint, backend_root);
-    if (!m)
-        return -ENOMEM;
+    if (!m) return -ENOMEM;
 
-    /* TODO: If backend_ops registered, call init and store backend_data */
+    /* Initialize backend */
+    void *backend_data = NULL;
+    int ret = ops->init(backend_root, &backend_data);
+    if (ret < 0) {
+        vfs_mount_destroy(m);
+        return ret;
+    }
+
+    /* Attach backend to mount */
+    m->backend_ops = ops;
+    m->backend_data = backend_data;
+
     return 0;
 }
 
@@ -840,4 +1100,65 @@ int vfs_unmount_backend(const char *mountpoint)
         return -ENOENT;
 
     return vfs_mount_destroy(m);
+}
+
+/* -------------------------------------------------------------------------- */
+/* FUSE-Compatible API Extensions */
+/* -------------------------------------------------------------------------- */
+
+int vfs_destroy(void) {
+    return vfs_shutdown();
+}
+
+int vfs_getattr(const char *path, struct stat *stbuf) {
+    return vfs_stat(path, stbuf);
+}
+
+int vfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+    if (!path) return -EINVAL;
+    (void)fi;  /* Unused for now */
+    
+    /* Use open with O_CREAT flag */
+    int flags = O_CREAT | O_EXCL | O_RDWR;
+    return vfs_open(path, flags | mode);
+}
+
+int vfs_mkdir(const char *path, mode_t mode) {
+    if (!path) return -EINVAL;
+    
+    /* Create directory in VFS tree */
+    vfs_dentry_t *d = NULL;
+    int ret = vfs_resolve_path(path, &d);
+    if (ret < 0) return ret;
+    
+    /* If already exists, return error */
+    if (d && d->inode) return -EEXIST;
+    
+    /* Auto-creation by resolve_path already made it as directory */
+    /* Just verify it exists now */
+    if (d && d->inode && S_ISDIR(d->inode->mode)) {
+        return 0;
+    }
+    
+    return -EIO;
+}
+
+int vfs_mknod(const char *path, mode_t mode, dev_t rdev) {
+    (void)rdev;  /* Not supported for now */
+    return vfs_create(path, mode, NULL);
+}
+
+ssize_t vfs_readlink(const char *path, char *buf, size_t size) {
+    if (!path || !buf || size == 0) return -EINVAL;
+    
+    /* Symlinks not implemented yet */
+    (void)path;
+    return -ENOSYS;
+}
+
+int vfs_symlink(const char *target, const char *linkpath) {
+    if (!target || !linkpath) return -EINVAL;
+    
+    /* Symlinks not implemented yet */
+    return -ENOSYS;
 }

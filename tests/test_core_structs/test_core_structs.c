@@ -43,13 +43,18 @@ static void test_dentry_tree(void) {
 
     vfs_dentry_t *root = vfs_dentry_create("/", NULL, root_inode);
     assert(root);
+    vfs_inode_release(root_inode);  /* dentry holds a reference now */
+    
     /* create child entries */
     vfs_inode_t *a_inode = vfs_inode_create(3, S_IFDIR | 0755, 1000, 1000, 0);
     vfs_dentry_t *a = vfs_dentry_create("a", root, a_inode);
     assert(a);
+    vfs_inode_release(a_inode);  /* dentry holds a reference now */
+    
     vfs_inode_t *b_inode = vfs_inode_create(4, S_IFREG | 0644, 1000, 1000, 10);
     vfs_dentry_t *b = vfs_dentry_create("b", root, b_inode);
     assert(b);
+    vfs_inode_release(b_inode);  /* dentry holds a reference now */
 
     /* basic sanity */
     assert(strcmp(root->name, "/") == 0);
