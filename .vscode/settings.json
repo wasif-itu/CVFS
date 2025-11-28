@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "*.gs": "javascript",
+    ".env*": "dotenv",
+    "vfs_core.h": "c"
+  }
+}
