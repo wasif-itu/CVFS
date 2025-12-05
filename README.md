@@ -154,3 +154,6 @@ This repository is for educational use. If you plan to redistribute or publish, 
 
 ## Acknowledgements
 Built as a structured exploration of VFS design, FUSE integration, and systems testing under WSL.
+
+## Future Goals
+Implements Hybrid and dynamic algorithms to manage cache and memory frames to extend degree of multi programing of cpu
